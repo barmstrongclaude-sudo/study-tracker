@@ -1,6 +1,6 @@
 /* Lets the installed app open with no connection. The app page checks the network first,
    so updates arrive on their own; everything else is served from the saved copy. */
-var CACHE = "study-tracker-v1";
+var CACHE = "study-tracker-v2";
 var SHELL = ["./", "index.html", "config.js", "manifest.webmanifest", "icon-180.png", "icon-192.png", "icon-512.png", "icon-64.png"];
 self.addEventListener("install", function(e){
   e.waitUntil(caches.open(CACHE).then(function(c){ return c.addAll(SHELL); }).then(function(){ return self.skipWaiting(); }));

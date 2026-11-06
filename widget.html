@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Study Tracker widget</title>
+<style>
+:root{color-scheme:light dark;--bg:#E8EAE4;--ink:#14171A;--soft:#4F565C;--panel:#F4F5F1}
+@media (prefers-color-scheme:dark){:root{--bg:#101317;--ink:#EEF0EC;--soft:#A7AEB3;--panel:#191D22}}
+body{margin:0;background:var(--bg);color:var(--ink);font:17px/1.45 -apple-system,system-ui,sans-serif;padding:20px;max-width:620px}
+h1{font-size:30px;margin:0 0 6px}ol{padding-left:22px}li{margin:10px 0}
+button{font:600 18px -apple-system,system-ui,sans-serif;width:100%;padding:16px;border:0;border-radius:8px;background:var(--ink);color:var(--bg);margin:14px 0}
+p{color:var(--soft)}textarea{width:100%;height:120px;font:12px ui-monospace,monospace;background:var(--panel);color:var(--ink);border:0;border-radius:8px;padding:10px;box-sizing:border-box}
+</style></head><body>
+<h1>Study Tracker widget</h1>
+<p>Open this page on your iPhone.</p>
+<ol>
+<li>Install <b>Scriptable</b>, a free app, from the App Store.</li>
+<li>Tap the button below to copy the widget.</li>
+<li>In Scriptable, tap <b>+</b>, paste, and rename the script <b>Study Tracker</b> at the top.</li>
+<li>Tap the <b>play</b> button and sign in with your Study Tracker email and password.</li>
+<li>On your Home Screen or Lock Screen, add a <b>Scriptable</b> widget. Tap the new widget while editing, and choose <b>Study Tracker</b> as the Script.</li>
+</ol>
+<button id="copy">Copy the widget</button>
+<textarea id="code" readonly>// Study Tracker widget for the Scriptable app.
+// Run it once inside Scriptable to sign in. Then add it to your Home Screen or Lock Screen.
+const URL_BASE = "https://ecgfcewprolbajlwchad.supabase.co";
+const KEY = "sb_publishable_q4La0pBkXWDzhvoG7-x33A_i0nMifP1";
+const TOKEN = "study-tracker-widget-refresh";
+const HUES = { pine: "#EDBB23", amber: "#F26B43", slate: "#6CCB4F", plum: "#1FA3AD", clay: "#3F6FF0", moss: "#B794FA", gold: "#E25DBD", berry: "#F7B3C8" };
+
+function dayStart(ms, add) { const d = new Date(ms); d.setHours(0, 0, 0, 0); if (add) d.setDate(d.getDate() + add); return d.getTime(); }
+function fmt(sec) {
+  sec = Math.max(0, Math.round(sec));
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+  if (h > 0) return h + "h " + String(m).padStart(2, "0") + "m";
+  return m + "m";
+}
+// Everything the widget shows, worked out from your synced data
+function summarize(state, now) {
+  const sessions = state.sessions || [], today = dayStart(now), tomorrow = dayStart(now, 1);
+  const todays = sessions.filter(s => s.startedAt >= today &amp;&amp; s.startedAt &lt; tomorrow).sort((a, b) => a.startedAt - b.startedAt);
+  const secOn = {};
+  sessions.forEach(s => { const k = dayStart(s.startedAt); secOn[k] = (secOn[k] || 0) + s.durationSec; });
+  let streak = secOn[today] ? 1 : 0, day = dayStart(now, -1);
+  while (secOn[day]) { streak++; day = dayStart(day, -1); }
+  const weekStart = dayStart(now, -6);
+  const weekSec = sessions.filter(s => s.startedAt >= weekStart &amp;&amp; s.startedAt &lt; tomorrow).reduce((n, s) => n + s.durationSec, 0);
+  const a = state.activeSession;
+  let active = null;
+  if (a &amp;&amp; !a.autoFinished) {
+    const elapsed = a.accumulatedSec + (a.isPaused ? 0 : (now - a.startedAt) / 1000);
+    active = { name: a.subjectName, hue: a.subjectHue, paused: !!a.isPaused, elapsed, countdown: a.mode === "countdown", planned: a.plannedSec || 0 };
+  }
+  const todaySec = todays.reduce((n, s) => n + s.durationSec, 0);
+  return { todaySec, totalToday: todaySec + (active ? active.elapsed : 0), count: todays.length, streak, weekSec, active,
+    layers: todays.map(s => ({ hue: s.subjectHue, sec: s.durationSec })) };
+}
+
+async function post(path, body) {
+  const r = new Request(URL_BASE + path);
+  r.method = "POST"; r.headers = { apikey: KEY, "Content-Type": "application/json" }; r.body = JSON.stringify(body);
+  const d = await r.loadJSON();
+  return { ok: r.response.statusCode &lt; 400, d };
+}
+async function signIn() {
+  const al = new Alert();
+  al.title = "Study Tracker";
+  al.message = "Sign in with the same email and password as the app. Only a sign-in token is saved, in your iPhone's Keychain.";
+  al.addTextField("Email"); al.addSecureTextField("Password");
+  al.addAction("Sign in"); al.addCancelAction("Cancel");
+  if ((await al.present()) === -1) return false;
+  const { ok, d } = await post("/auth/v1/token?grant_type=password", { email: al.textFieldValue(0).trim(), password: al.textFieldValue(1) });
+  if (!ok) { const e = new Alert(); e.title = "That didn't work"; e.message = "Check your email and password, then run the script again."; e.addAction("OK"); await e.present(); return false; }
+  Keychain.set(TOKEN, d.refresh_token);
+  return true;
+}
+async function load() {
+  if (!Keychain.contains(TOKEN)) return { signedOut: true };
+  const { ok, d } = await post("/auth/v1/token?grant_type=refresh_token", { refresh_token: Keychain.get(TOKEN) });
+  if (!ok) { if (d &amp;&amp; d.error_code) Keychain.remove(TOKEN); return { signedOut: true }; }
+  Keychain.set(TOKEN, d.refresh_token);
+  const q = new Request(URL_BASE + "/rest/v1/study_state?select=state");
+  q.headers = { apikey: KEY, Authorization: "Bearer " + d.access_token };
+  const rows = await q.loadJSON();
+  const state = rows &amp;&amp; rows[0] ? rows[0].state : { sessions: [] };
+  const summary = summarize(state, Date.now());
+  // kept so the widget still shows something with no connection
+  FileManager.local().writeString(FileManager.local().joinPath(FileManager.local().documentsDirectory(), "study-tracker-widget.json"), JSON.stringify(state));
+  return { summary };
+}
+function cached() {
+  const fm = FileManager.local(), p = fm.joinPath(fm.documentsDirectory(), "study-tracker-widget.json");
+  return fm.fileExists(p) ? { summary: summarize(JSON.parse(fm.readString(p)), Date.now()) } : { failed: true };
+}
+
+const INK = Color.dynamic(new Color("#14171A"), new Color("#EEF0EC"));
+const SOFT = Color.dynamic(new Color("#4F565C"), new Color("#A7AEB3"));
+function liveDate(st, a, opts) {
+  const d = a.countdown ? new Date(Date.now() + Math.max(0, a.planned - a.elapsed) * 1000) : new Date(Date.now() - a.elapsed * 1000);
+  const t = st.addDate(d); t.applyTimerStyle();
+  t.font = opts.font; t.textColor = opts.color; t.minimumScaleFactor = 0.5; t.lineLimit = 1;
+  return t;
+}
+function layersImage(layers, active, w, h) {
+  const dc = new DrawContext(); dc.size = new Size(w, h); dc.opaque = false; dc.respectScreenScale = true;
+  const parts = layers.slice();
+  if (active &amp;&amp; active.elapsed > 0) parts.push({ hue: active.hue, sec: active.elapsed });
+  const total = parts.reduce((n, p) => n + p.sec, 0);
+  if (!total) { dc.setFillColor(new Color("#888888", 0.25)); dc.fillRect(new Rect(0, 0, w, h)); return dc.getImage(); }
+  let x = 0;
+  parts.forEach(p => { const pw = p.sec / total * w; dc.setFillColor(new Color(HUES[p.hue] || "#888888")); dc.fillRect(new Rect(x, 0, Math.max(pw - 1.5, 1), h)); x += pw; });
+  return dc.getImage();
+}
+function lockWidget(w, s, family) {
+  const a = s.active;
+  if (family === "accessoryInline") {
+    const st = w.addStack();
+    if (a &amp;&amp; !a.paused) { const n = st.addText(a.name + " "); n.lineLimit = 1; liveDate(st, a, { font: Font.systemFont(13), color: Color.white() }); }
+    else st.addText(fmt(s.totalToday) + " today · " + s.streak + "d streak");
+    return;
+  }
+  if (family === "accessoryCircular") {
+    w.addAccessoryWidgetBackground = true;
+    const big = w.addText(a ? fmt(a.elapsed).replace(/ .*/, "") : fmt(s.totalToday).replace(/ /, "\n"));
+    big.font = Font.boldSystemFont(14); big.centerAlignText(); big.minimumScaleFactor = 0.5;
+    return;
+  }
+  // accessoryRectangular
+  if (a) {
+    const n = w.addText(a.name); n.font = Font.semiboldSystemFont(13); n.lineLimit = 1;
+    if (a.paused) { const p = w.addText("Paused at " + fmt(a.elapsed)); p.font = Font.systemFont(14); }
+    else liveDate(w, a, { font: Font.boldSystemFont(22), color: Color.white() });
+  } else {
+    const t = w.addText(fmt(s.totalToday) + " today"); t.font = Font.boldSystemFont(18); t.minimumScaleFactor = 0.6;
+    const b = w.addText(s.streak + "-day streak · " + fmt(s.weekSec) + " this week"); b.font = Font.systemFont(12); b.minimumScaleFactor = 0.6;
+  }
+}
+function homeWidget(w, s, family) {
+  w.backgroundColor = Color.dynamic(new Color("#E8EAE4"), new Color("#101317"));
+  w.setPadding(14, 14, 14, 14);
+  const a = s.active, wide = family !== "small";
+  const lead = w.addText(a ? a.name : "Today");
+  lead.font = Font.semiboldSystemFont(13); lead.textColor = SOFT; lead.lineLimit = 1;
+  w.addSpacer(2);
+  if (a &amp;&amp; !a.paused) liveDate(w, a, { font: Font.heavyRoundedSystemFont(wide ? 42 : 34), color: INK });
+  else { const n = w.addText(a ? fmt(a.elapsed) : fmt(s.totalToday)); n.font = Font.heavyRoundedSystemFont(wide ? 42 : 34); n.textColor = INK; n.minimumScaleFactor = 0.5; n.lineLimit = 1; }
+  w.addSpacer(null);
+  const img = w.addImage(layersImage(s.layers, a, wide ? 320 : 130, 12));
+  img.imageSize = new Size(wide ? 320 : 130, 12);
+  w.addSpacer(6);
+  const f = w.addText(a &amp;&amp; a.paused ? "Paused" : s.streak + "-day streak" + (wide ? " · " + fmt(s.weekSec) + " in the last 7 days" : ""));
+  f.font = Font.systemFont(12); f.textColor = SOFT; f.lineLimit = 1; f.minimumScaleFactor = 0.7;
+}
+function message(w, text) {
+  const t = w.addText(text); t.font = Font.semiboldSystemFont(13); t.minimumScaleFactor = 0.6;
+}
+
+async function main() {
+  if (config.runsInApp &amp;&amp; !Keychain.contains(TOKEN)) { if (!(await signIn())) { Script.complete(); return; } }
+  let res;
+  try { res = await load(); } catch (e) { res = cached(); }
+  const family = config.widgetFamily || "medium";
+  const w = new ListWidget();
+  if (res.signedOut) message(w, "Open Scriptable and run this script to sign in.");
+  else if (res.failed) message(w, "Couldn't reach your data yet. It will try again soon.");
+  else if (family.indexOf("accessory") === 0) lockWidget(w, res.summary, family);
+  else homeWidget(w, res.summary, family);
+  w.refreshAfterDate = new Date(Date.now() + 15 * 60000);
+  if (config.runsInWidget) Script.setWidget(w); else await w.presentMedium();
+  Script.complete();
+}
+if (typeof Script !== "undefined") await main();
+</textarea>
+<script>
+document.getElementById("copy").onclick=function(){var b=this,t=document.getElementById("code");
+function done(){b.textContent="Copied. Now open Scriptable."}
+if(navigator.clipboard){navigator.clipboard.writeText(t.value).then(done,function(){t.select();document.execCommand("copy");done()})}else{t.select();document.execCommand("copy");done()}};
+</script></body></html>
