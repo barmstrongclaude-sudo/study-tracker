@@ -38,21 +38,63 @@ function fmt(sec) {
 function summarize(state, now) {
   const sessions = state.sessions || [], today = dayStart(now), tomorrow = dayStart(now, 1);
   const todays = sessions.filter(s => s.startedAt >= today &amp;&amp; s.startedAt &lt; tomorrow).sort((a, b) => a.startedAt - b.startedAt);
-  const secOn = {};
-  sessions.forEach(s => { const k = dayStart(s.startedAt); secOn[k] = (secOn[k] || 0) + s.durationSec; });
+  const secOn = {}, topOn = {};
+  sessions.forEach(s => {
+    const k = dayStart(s.startedAt); secOn[k] = (secOn[k] || 0) + s.durationSec;
+    topOn[k] = topOn[k] || {}; topOn[k][s.subjectHue] = (topOn[k][s.subjectHue] || 0) + s.durationSec;
+  });
   let streak = secOn[today] ? 1 : 0, day = dayStart(now, -1);
   while (secOn[day]) { streak++; day = dayStart(day, -1); }
   const weekStart = dayStart(now, -6);
   const weekSec = sessions.filter(s => s.startedAt >= weekStart &amp;&amp; s.startedAt &lt; tomorrow).reduce((n, s) => n + s.durationSec, 0);
+  const allSec = sessions.reduce((n, s) => n + s.durationSec, 0);
+  // your usual day, or your goal if you set one
+  const past = [];
+  for (let i = 1; i &lt;= 28; i++) { const v = secOn[dayStart(now, -i)]; if (v) past.push(v); }
+  past.sort((x, y) => x - y);
+  const goal = state.goals &amp;&amp; state.goals.dailyMinutes ? state.goals.dailyMinutes * 60 : null;
+  const target = goal || (past.length ? past[Math.floor(past.length / 2)] : 7200);
+  // bedrock: one band per studied day over the last 30, in that day's top subject color
+  const bands = [];
+  for (let i = 30; i >= 1; i--) {
+    const k = dayStart(now, -i);
+    if (!secOn[k]) continue;
+    const hue = Object.keys(topOn[k]).sort((p, q) => topOn[k][q] - topOn[k][p])[0];
+    bands.push({ hue, sec: secOn[k] });
+  }
   const a = state.activeSession;
   let active = null;
   if (a &amp;&amp; !a.autoFinished) {
     const elapsed = a.accumulatedSec + (a.isPaused ? 0 : (now - a.startedAt) / 1000);
-    active = { name: a.subjectName, hue: a.subjectHue, paused: !!a.isPaused, elapsed, countdown: a.mode === "countdown", planned: a.plannedSec || 0 };
+    const same = sessions.filter(s => s.subjectName === a.subjectName).sort((p, q) => q.startedAt - p.startedAt);
+    const recent = same.slice(0, 20);
+    const usual = recent.length >= 3 ? recent.reduce((n, s) => n + s.durationSec, 0) / recent.length : null;
+    const best = same.length >= 3 ? same.reduce((n, s) => Math.max(n, s.durationSec), 0) : null;
+    active = { name: a.subjectName, hue: a.subjectHue, paused: !!a.isPaused, elapsed, countdown: a.mode === "countdown", planned: a.plannedSec || 0, usual, best };
   }
   const todaySec = todays.reduce((n, s) => n + s.durationSec, 0);
-  return { todaySec, totalToday: todaySec + (active ? active.elapsed : 0), count: todays.length, streak, weekSec, active,
-    layers: todays.map(s => ({ hue: s.subjectHue, sec: s.durationSec })) };
+  const step = 25 * 3600, nextHours = (Math.floor(allSec / step) + 1) * 25;
+  return { todaySec, totalToday: todaySec + (active ? active.elapsed : 0), count: todays.length, streak, weekSec, allSec, nextHours, toNext: nextHours * 3600 - allSec,
+    target, goal: !!goal, bands, active, layers: todays.map(s => ({ hue: s.subjectHue, name: s.subjectName, sec: s.durationSec })) };
+}
+// A fresh true line each time the widget refreshes
+function tagline(s, now) {
+  const a = s.active;
+  if (a) {
+    if (a.paused) return "Paused. The sand is waiting.";
+    if (a.countdown) return "Countdown running. Stay with it.";
+    if (a.usual &amp;&amp; a.elapsed &lt; a.usual) return "Beat " + fmt(a.usual) + ", your usual";
+    if (a.best &amp;&amp; a.elapsed &lt; a.best) return "Next: your record, " + fmt(a.best);
+    if (a.best) return "New longest sitting. Keep going.";
+    return "Setting your first marks.";
+  }
+  if (!s.todaySec) return s.streak > 0 ? "Keep your " + s.streak + "-day streak alive." : "No layers yet. Lay the first one.";
+  const left = s.target - s.todaySec, opts = [];
+  opts.push(left > 0 ? fmt(left) + " to your " + (s.goal ? "goal" : "usual day") : "Past your " + (s.goal ? "goal" : "usual day") + ". Nice.");
+  if (s.streak > 1) opts.push(s.streak + "-day streak and building.");
+  opts.push(fmt(s.toNext) + " to " + s.nextHours + " hours all time.");
+  if (s.count > 1) opts.push(s.count + " layers down today.");
+  return opts[Math.floor(now / (15 * 60000)) % opts.length];
 }
 
 async function post(path, body) {
@@ -92,63 +134,178 @@ function cached() {
   return fm.fileExists(p) ? { summary: summarize(JSON.parse(fm.readString(p)), Date.now()) } : { failed: true };
 }
 
-const INK = Color.dynamic(new Color("#14171A"), new Color("#EEF0EC"));
-const SOFT = Color.dynamic(new Color("#4F565C"), new Color("#A7AEB3"));
-function liveDate(st, a, opts) {
+const ON = { pine: "#14171A", amber: "#14171A", slate: "#14171A", plum: "#101317", clay: "#FFFFFF", moss: "#101317", gold: "#101317", berry: "#14171A" };
+const GROUND = "#101317", PAPER = "#EEF0EC", MUTED = "#A7AEB3";
+// Display type: the closest match on iPhone to the app's tall, heavy numbers
+function display(size) { return new Font("AvenirNextCondensed-Heavy", size); }
+function body(size) { return Font.semiboldSystemFont(size); }
+
+// A small repeatable random, so a layer keeps its texture between refreshes
+function seeded(seed) { let x = seed * 9301 + 49297; return () => { x = (x * 9301 + 49297) % 233280; return x / 233280; }; }
+function wave(x, seed, amp, W) { const k = 340 / W; return amp * (Math.sin(x * k * 0.024 + seed * 1.7) + 0.55 * Math.sin(x * k * 0.058 + seed * 2.9)); }
+function layerPath(y, seed, amp, W, H) {
+  const p = new Path();
+  p.move(new Point(-2, y + wave(0, seed, amp, W)));
+  for (let x = 6; x &lt;= W + 6; x += 6) p.addLine(new Point(x, y + wave(x, seed, amp, W)));
+  p.addLine(new Point(W + 8, H + 2)); p.addLine(new Point(-2, H + 2)); p.closeSubpath();
+  return p;
+}
+function fillLayer(dc, y, seed, amp, W, H, color, seam) {
+  if (seam) { dc.addPath(layerPath(y - 1.5, seed, amp, W, H)); dc.setFillColor(new Color(GROUND)); dc.fillPath(); }
+  dc.addPath(layerPath(y, seed, amp, W, H)); dc.setFillColor(new Color(color)); dc.fillPath();
+  // mineral speckle
+  const r = seeded(seed + 3), n = Math.round(W * Math.max(H - y, 0) / 900);
+  for (let i = 0; i &lt; n; i++) {
+    const px = r() * W, py = y + 3 + r() * (H - y);
+    dc.setFillColor(new Color(r() > 0.5 ? "#FFFFFF" : "#000000", 0.13));
+    dc.fillRect(new Rect(px, py, 1, 1));
+  }
+}
+// The whole scene: bedrock of the last 30 days, today's layers, the running layer, falling sand
+function drawScene(s, W, H, opts) {
+  const dc = new DrawContext(); dc.size = new Size(W, H); dc.opaque = true; dc.respectScreenScale = true;
+  dc.setFillColor(new Color(GROUND)); dc.fillRect(new Rect(0, 0, W, H));
+  const bedH = s.bands.length ? Math.min(H * 0.14, 34) : 0;
+  const room = H * opts.fill - bedH;
+  const a = s.active;
+  const parts = s.layers.map(l => ({ hue: l.hue, name: l.name, sec: l.sec }));
+  if (a) parts.push({ hue: a.hue, name: a.name, sec: a.elapsed, live: true });
+  const done = parts.reduce((n, p) => n + p.sec, 0);
+  const scale = room / Math.max(done, s.target);
+  const boxes = []; let acc = H - bedH;
+  parts.forEach((p, i) => { const h = Math.max(3, p.sec * scale); acc -= h; boxes.push({ top: acc, h, p, seed: i + 1 }); });
+  const surface = boxes.length ? acc : H - bedH;
+  // falling sand above the surface
+  const r = seeded(boxes.length + 11), sandHue = a ? a.hue : (parts.length ? parts[parts.length - 1].hue : "pine");
+  const grains = a &amp;&amp; !a.paused ? 26 : 14;
+  dc.setFillColor(new Color(HUES[sandHue] || "#EDBB23"));
+  for (let i = 0; i &lt; grains; i++) {
+    const gx = r() * W, gy = surface - 4 - Math.pow(r(), 1.5) * (surface * 0.75), size = 1.2 + r() * 1.8;
+    dc.fillEllipse(new Rect(gx, gy, size, size));
+  }
+  // target line, drawn as dots
+  const ty = H - bedH - s.target * scale;
+  if (opts.line &amp;&amp; ty > 2 &amp;&amp; ty &lt; H) {
+    dc.setFillColor(new Color(MUTED, 0.7));
+    for (let x = 2; x &lt; W; x += 8) dc.fillRect(new Rect(x, ty, 3.5, 1.5));
+  }
+  // top layer first so each lower one overlaps it
+  for (let i = boxes.length - 1; i >= 0; i--) {
+    const b = boxes[i];
+    fillLayer(dc, b.top, b.seed, Math.min(3, b.h * 0.14), W, H, HUES[b.p.hue] || MUTED, true);
+  }
+  let by = H - bedH;
+  s.bands.forEach((band, i, all) => {
+    fillLayer(dc, by, i + 40, 0.8, W, H, HUES[all[all.length - 1 - i].hue] || MUTED, i === 0);
+    by += all[all.length - 1 - i].sec / all.reduce((n, x) => n + x.sec, 0) * bedH;
+  });
+  // labels on layers tall enough to hold one
+  if (opts.labels) {
+    dc.setFont(body(11));
+    boxes.forEach(b => {
+      if (b.h >= 18) {
+        dc.setTextColor(new Color(ON[b.p.hue] || GROUND));
+        dc.drawTextInRect(b.p.name + "  " + fmt(b.p.sec), new Rect(14, b.top + b.h / 2 - 6, W - 28, 16));
+      }
+    });
+  }
+  return dc.getImage();
+}
+function ringImage(frac, size) {
+  const dc = new DrawContext(); dc.size = new Size(size, size); dc.opaque = false; dc.respectScreenScale = true;
+  const c = size / 2, R = c - 3, steps = 60;
+  for (let i = 0; i &lt; steps; i++) {
+    const t = i / steps, ang = -Math.PI / 2 + t * 2 * Math.PI;
+    const on = t &lt; Math.min(1, frac);
+    dc.setFillColor(new Color("#FFFFFF", on ? 1 : 0.28));
+    const d = on ? 4.4 : 3;
+    dc.fillEllipse(new Rect(c + R * Math.cos(ang) - d / 2, c + R * Math.sin(ang) - d / 2, d, d));
+  }
+  return dc.getImage();
+}
+// Lock Screen is one color, so layers are told apart by brightness
+function monoStrata(s, W, H) {
+  const dc = new DrawContext(); dc.size = new Size(W, H); dc.opaque = false; dc.respectScreenScale = true;
+  const parts = s.layers.map(l => l.sec); if (s.active) parts.push(s.active.elapsed);
+  const scale = (H - 8) / Math.max(parts.reduce((n, x) => n + x, 0), s.target);
+  let acc = H - 6;
+  dc.setFillColor(new Color("#FFFFFF", 0.35)); dc.fillRect(new Rect(0, H - 6, W, 6));
+  const tops = parts.map(sec => { const h = Math.max(2.5, sec * scale); acc -= h; return acc; });
+  for (let i = tops.length - 1; i >= 0; i--) {
+    dc.addPath(layerPath(tops[i], i + 1, 1.2, W, H - 6));
+    dc.setFillColor(new Color("#FFFFFF", i % 2 ? 0.55 : 1)); dc.fillPath();
+  }
+  return dc.getImage();
+}
+function liveDate(st, a, font, color) {
   const d = a.countdown ? new Date(Date.now() + Math.max(0, a.planned - a.elapsed) * 1000) : new Date(Date.now() - a.elapsed * 1000);
-  const t = st.addDate(d); t.applyTimerStyle();
-  t.font = opts.font; t.textColor = opts.color; t.minimumScaleFactor = 0.5; t.lineLimit = 1;
+  const t = st.addDate(d); t.applyTimerStyle(); t.leftAlignText();
+  t.font = font; t.textColor = color; t.minimumScaleFactor = 0.5; t.lineLimit = 1;
   return t;
 }
-function layersImage(layers, active, w, h) {
-  const dc = new DrawContext(); dc.size = new Size(w, h); dc.opaque = false; dc.respectScreenScale = true;
-  const parts = layers.slice();
-  if (active &amp;&amp; active.elapsed > 0) parts.push({ hue: active.hue, sec: active.elapsed });
-  const total = parts.reduce((n, p) => n + p.sec, 0);
-  if (!total) { dc.setFillColor(new Color("#888888", 0.25)); dc.fillRect(new Rect(0, 0, w, h)); return dc.getImage(); }
-  let x = 0;
-  parts.forEach(p => { const pw = p.sec / total * w; dc.setFillColor(new Color(HUES[p.hue] || "#888888")); dc.fillRect(new Rect(x, 0, Math.max(pw - 1.5, 1), h)); x += pw; });
+function dotImage(hue) {
+  const dc = new DrawContext(); dc.size = new Size(12, 12); dc.opaque = false; dc.respectScreenScale = true;
+  dc.setFillColor(new Color(HUES[hue] || MUTED)); dc.fillEllipse(new Rect(0, 0, 12, 12));
   return dc.getImage();
 }
 function lockWidget(w, s, family) {
   const a = s.active;
   if (family === "accessoryInline") {
     const st = w.addStack();
-    if (a &amp;&amp; !a.paused) { const n = st.addText(a.name + " "); n.lineLimit = 1; liveDate(st, a, { font: Font.systemFont(13), color: Color.white() }); }
-    else st.addText(fmt(s.totalToday) + " today · " + s.streak + "d streak");
+    if (a &amp;&amp; !a.paused) { const n = st.addText(a.name + "  "); n.lineLimit = 1; liveDate(st, a, Font.systemFont(13), Color.white()); }
+    else st.addText(fmt(s.totalToday) + " today · " + s.streak + "-day streak");
     return;
   }
   if (family === "accessoryCircular") {
     w.addAccessoryWidgetBackground = true;
-    const big = w.addText(a ? fmt(a.elapsed).replace(/ .*/, "") : fmt(s.totalToday).replace(/ /, "\n"));
-    big.font = Font.boldSystemFont(14); big.centerAlignText(); big.minimumScaleFactor = 0.5;
+    const frac = s.totalToday / s.target;
+    w.backgroundImage = ringImage(frac, 76);
+    const label = fmt(s.totalToday);
+    const big = w.addText(label.replace(/ .*/, ""));
+    big.font = display(22); big.textColor = Color.white(); big.centerAlignText(); big.minimumScaleFactor = 0.6; big.lineLimit = 1;
+    const parts = label.split(" ");
+    if (parts[1]) { const sm = w.addText(parts[1]); sm.font = body(10); sm.textColor = Color.white(); sm.centerAlignText(); }
     return;
   }
   // accessoryRectangular
+  w.setPadding(0, 0, 0, 0);
+  const row = w.addStack(); row.layoutHorizontally(); row.centerAlignContent(); row.spacing = 8;
+  const pic = row.addImage(monoStrata(s, 50, 50)); pic.imageSize = new Size(50, 50); pic.cornerRadius = 6;
+  const col = row.addStack(); col.layoutVertically();
   if (a) {
-    const n = w.addText(a.name); n.font = Font.semiboldSystemFont(13); n.lineLimit = 1;
-    if (a.paused) { const p = w.addText("Paused at " + fmt(a.elapsed)); p.font = Font.systemFont(14); }
-    else liveDate(w, a, { font: Font.boldSystemFont(22), color: Color.white() });
+    const n = col.addText(a.name); n.font = body(12); n.lineLimit = 1; n.minimumScaleFactor = 0.7; n.textColor = Color.white();
+    if (a.paused) { const p = col.addText(fmt(a.elapsed)); p.font = display(30); p.textColor = Color.white(); }
+    else liveDate(col, a, display(30), Color.white());
   } else {
-    const t = w.addText(fmt(s.totalToday) + " today"); t.font = Font.boldSystemFont(18); t.minimumScaleFactor = 0.6;
-    const b = w.addText(s.streak + "-day streak · " + fmt(s.weekSec) + " this week"); b.font = Font.systemFont(12); b.minimumScaleFactor = 0.6;
+    const t = col.addText(fmt(s.totalToday)); t.font = display(30); t.textColor = Color.white(); t.lineLimit = 1; t.minimumScaleFactor = 0.6;
+    const b = col.addText(s.streak + "-day streak"); b.font = body(12); b.textColor = Color.white(); b.lineLimit = 1;
   }
 }
-function homeWidget(w, s, family) {
-  w.backgroundColor = Color.dynamic(new Color("#E8EAE4"), new Color("#101317"));
-  w.setPadding(14, 14, 14, 14);
-  const a = s.active, wide = family !== "small";
-  const lead = w.addText(a ? a.name : "Today");
-  lead.font = Font.semiboldSystemFont(13); lead.textColor = SOFT; lead.lineLimit = 1;
-  w.addSpacer(2);
-  if (a &amp;&amp; !a.paused) liveDate(w, a, { font: Font.heavyRoundedSystemFont(wide ? 42 : 34), color: INK });
-  else { const n = w.addText(a ? fmt(a.elapsed) : fmt(s.totalToday)); n.font = Font.heavyRoundedSystemFont(wide ? 42 : 34); n.textColor = INK; n.minimumScaleFactor = 0.5; n.lineLimit = 1; }
+const SIZES = { small: [170, 170, 50, 0.36], medium: [364, 170, 64, 0.36], large: [364, 382, 100, 0.46], extraLarge: [715, 340, 100, 0.4] };
+function homeWidget(w, s, family, now) {
+  const [W, H, numSize, fill] = SIZES[family] || SIZES.medium;
+  const a = s.active, small = family === "small";
+  w.backgroundImage = drawScene(s, W, H, { fill, labels: !small, line: family === "large" || family === "extraLarge" });
+  w.setPadding(small ? 12 : 14, small ? 13 : 16, 8, 12);
+  const PAPERC = new Color(PAPER), MUTEDC = new Color(MUTED);
+  const lead = w.addStack(); lead.layoutHorizontally(); lead.centerAlignContent(); lead.spacing = 5;
+  if (a) { const d = lead.addImage(dotImage(a.hue)); d.imageSize = new Size(9, 9); }
+  const name = lead.addText(a ? a.name : "Today");
+  name.font = body(small ? 12 : 13); name.textColor = PAPERC; name.lineLimit = 1; name.minimumScaleFactor = 0.7;
+  if (a &amp;&amp; !a.paused) liveDate(w, a, display(numSize), PAPERC);
+  else { const n = w.addText(a ? fmt(a.elapsed) : fmt(s.totalToday)); n.font = display(numSize); n.textColor = PAPERC; n.lineLimit = 1; n.minimumScaleFactor = 0.5; }
+  const line = w.addText(tagline(s, now));
+  line.font = body(small ? 10.5 : 12); line.textColor = MUTEDC; line.lineLimit = 1; line.minimumScaleFactor = 0.75;
+  if (family === "large" || family === "extraLarge") {
+    w.addSpacer(10);
+    const row = w.addStack(); row.layoutHorizontally(); row.spacing = 22;
+    [[s.streak + "d", "Streak"], [fmt(s.weekSec), "Last 7 days"], [Math.floor(s.allSec / 3600) + "h", "All time"]].forEach(pair => {
+      const c = row.addStack(); c.layoutVertically();
+      const v = c.addText(pair[0]); v.font = display(24); v.textColor = PAPERC; v.lineLimit = 1;
+      const l = c.addText(pair[1]); l.font = body(10.5); l.textColor = MUTEDC; l.lineLimit = 1;
+    });
+  }
   w.addSpacer(null);
-  const img = w.addImage(layersImage(s.layers, a, wide ? 320 : 130, 12));
-  img.imageSize = new Size(wide ? 320 : 130, 12);
-  w.addSpacer(6);
-  const f = w.addText(a &amp;&amp; a.paused ? "Paused" : s.streak + "-day streak" + (wide ? " · " + fmt(s.weekSec) + " in the last 7 days" : ""));
-  f.font = Font.systemFont(12); f.textColor = SOFT; f.lineLimit = 1; f.minimumScaleFactor = 0.7;
 }
 function message(w, text) {
   const t = w.addText(text); t.font = Font.semiboldSystemFont(13); t.minimumScaleFactor = 0.6;
@@ -163,7 +320,7 @@ async function main() {
   if (res.signedOut) message(w, "Open Scriptable and run this script to sign in.");
   else if (res.failed) message(w, "Couldn't reach your data yet. It will try again soon.");
   else if (family.indexOf("accessory") === 0) lockWidget(w, res.summary, family);
-  else homeWidget(w, res.summary, family);
+  else homeWidget(w, res.summary, family, Date.now());
   w.refreshAfterDate = new Date(Date.now() + 15 * 60000);
   if (config.runsInWidget) Script.setWidget(w); else await w.presentMedium();
   Script.complete();
